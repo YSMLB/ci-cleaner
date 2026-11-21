@@ -1,0 +1,10 @@
+[Unit]
+Description=Check CI builder cache
+After=docker.service
+
+[Service]
+Type=oneshot
+Environment="DOCKER_DIR=/var/lib/docker" "BUILDER=ci-builder" "MIN_FREE_GIB=25" "MIN_CACHE_AGE=30m" "APPLY_FLAG="
+EnvironmentFile=-/etc/default/ci-cleaner
+ExecStart=/usr/local/bin/ci-cleaner --docker-dir ${DOCKER_DIR} --builder ${BUILDER} --min-free-gib ${MIN_FREE_GIB} --min-cache-age ${MIN_CACHE_AGE} $APPLY_FLAG
+TimeoutStartSec=150s

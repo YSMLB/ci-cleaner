@@ -5,15 +5,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strconv"
-	"strings"
 )
 
 const kibPerGiB = 1024 * 1024
-
-func sweep(ctx context.Context, cfg Config) error {
-	return sweepWith(ctx, cfg, freeKiB, docker)
-}
 
 func sweepWith(ctx context.Context, cfg Config, readFree func(context.Context, string) (uint64, error), runDocker func(context.Context, ...string) error) error {
 	before, err := readFree(ctx, cfg.DockerDir)
@@ -53,23 +47,6 @@ func sweepWith(ctx context.Context, cfg Config, readFree func(context.Context, s
 	}
 	fmt.Printf("result=pruned free_after_kib=%d\n", after)
 	return nil
-}
-
-func freeKiB(ctx context.Context, path string) (uint64, error) {
-	cmd := exec.CommandContext(ctx, "df", "-k", "--output=avail", "--", path)
-	output, err := cmd.Output()
-	if err != nil {
-		if ctx.Err() != nil {
-			err = ctx.Err()
-		}
-		return 0, fmt.Errorf("df %q: %w", path, err)
-	}
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	available, err := strconv.ParseUint(strings.TrimSpace(lines[len(lines)-1]), 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("read free space for %q: %w", path, err)
-	}
-	return available, nil
 }
 
 func docker(ctx context.Context, args ...string) error {

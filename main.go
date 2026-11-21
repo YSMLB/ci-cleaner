@@ -14,11 +14,11 @@ import (
 const sweepTimeout = 2 * time.Minute
 
 type Config struct {
-	DockerDir string
-	Builder string
-	MinFreeGiB uint64
+	DockerDir   string
+	Builder     string
+	MinFreeGiB  uint64
 	MinCacheAge time.Duration
-	Apply bool
+	Apply       bool
 }
 
 func main() {
