@@ -12,7 +12,11 @@ import (
 const kibPerGiB = 1024 * 1024
 
 func sweep(ctx context.Context, cfg Config) error {
-	before, err := freeKiB(ctx, cfg.DockerDir)
+	return sweepWith(ctx, cfg, freeKiB, docker)
+}
+
+func sweepWith(ctx context.Context, cfg Config, readFree func(context.Context, string) (uint64, error), runDocker func(context.Context, ...string) error) error {
+	before, err := readFree(ctx, cfg.DockerDir)
 	if err != nil {
 		return err
 	}
@@ -23,7 +27,7 @@ func sweep(ctx context.Context, cfg Config) error {
 	fmt.Printf("builder=%q mode=%s free_before_kib=%d threshold_gib=%d\n", cfg.Builder, mode, before, cfg.MinFreeGiB)
 
 	if before/kibPerGiB >= cfg.MinFreeGiB {
-		if err := docker(ctx, "buildx", "inspect", cfg.Builder); err != nil {
+		if err := runDocker(ctx, "buildx", "inspect", cfg.Builder); err != nil {
 			return err
 		}
 		fmt.Printf("result=enough_space free_after_kib=%d\n", before)
@@ -32,7 +36,7 @@ func sweep(ctx context.Context, cfg Config) error {
 
 	prune := []string{"buildx", "prune", "--builder", cfg.Builder, "--force", "--filter", "until=" + cfg.MinCacheAge.String()}
 	if !cfg.Apply {
-		if err := docker(ctx, "buildx", "du", "--builder", cfg.Builder); err != nil {
+		if err := runDocker(ctx, "buildx", "du", "--builder", cfg.Builder); err != nil {
 			return err
 		}
 		fmt.Printf("planned command: docker %q\n", prune)
@@ -40,10 +44,10 @@ func sweep(ctx context.Context, cfg Config) error {
 		return nil
 	}
 
-	if err := docker(ctx, prune...); err != nil {
+	if err := runDocker(ctx, prune...); err != nil {
 		return err
 	}
-	after, err := freeKiB(ctx, cfg.DockerDir)
+	after, err := readFree(ctx, cfg.DockerDir)
 	if err != nil {
 		return fmt.Errorf("prune succeeded but free space could not be checked: %w", err)
 	}
