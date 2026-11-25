@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+exec /usr/local/bin/ci-cleaner check-space \
+    --min-free-gib "${CI_RUNNER_MIN_FREE_GIB:?set CI_RUNNER_MIN_FREE_GIB in runner .env}" \
+    --min-free-inodes "${CI_RUNNER_MIN_FREE_INODES:?set CI_RUNNER_MIN_FREE_INODES in runner .env}" \
+    "${CI_RUNNER_DOCKER_DIR:-/var/lib/docker}" \
+    "${CI_RUNNER_WORK_DIR:?set CI_RUNNER_WORK_DIR to the existing runner work directory}"

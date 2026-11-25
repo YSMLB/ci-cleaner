@@ -5,6 +5,8 @@ After=docker.service
 [Service]
 Type=oneshot
 Environment="DOCKER_DIR=/var/lib/docker" "BUILDER=ci-builder" "MIN_FREE_GIB=25" "MIN_CACHE_AGE=30m" "APPLY_FLAG="
+# The binary reads these from the environment, including with an ExecStart drop-in.
+Environment="CI_CLEANER_MIN_FREE_AFTER_GIB=15" "CI_CLEANER_MIN_FREE_AFTER_INODES=10000"
 EnvironmentFile=-/etc/default/ci-cleaner
 ExecStart=/usr/local/bin/ci-cleaner --docker-dir ${DOCKER_DIR} --builder ${BUILDER} --min-free-gib ${MIN_FREE_GIB} --min-cache-age ${MIN_CACHE_AGE} $APPLY_FLAG
 TimeoutStartSec=150s

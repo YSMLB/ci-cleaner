@@ -7,10 +7,8 @@ import (
 	"os/exec"
 )
 
-const kibPerGiB = 1024 * 1024
-
-func sweepWith(ctx context.Context, cfg Config, readFree func(context.Context, string) (uint64, error), runDocker func(context.Context, ...string) error) error {
-	before, err := readFree(ctx, cfg.DockerDir)
+func sweepWith(ctx context.Context, cfg Config, readFree func() (diskSpace, error), runDocker func(context.Context, ...string) error) error {
+	before, err := readFree()
 	if err != nil {
 		return err
 	}
@@ -18,13 +16,14 @@ func sweepWith(ctx context.Context, cfg Config, readFree func(context.Context, s
 	if cfg.Apply {
 		mode = "apply"
 	}
-	fmt.Printf("builder=%q mode=%s free_before_kib=%d threshold_gib=%d\n", cfg.Builder, mode, before, cfg.MinFreeGiB)
+	fmt.Printf("builder=%q mode=%s free_before_kib=%d threshold_gib=%d\n", cfg.Builder, mode, before.freeKiB, cfg.MinFreeGiB)
 
-	if cfg.MinFreeGiB != 0 && before/kibPerGiB >= cfg.MinFreeGiB {
+	if cfg.MinFreeGiB != 0 && !before.below(cfg.MinFreeGiB, 0) &&
+		!before.below(cfg.MinFreeAfterGiB, cfg.MinFreeAfterInodes) {
 		if err := runDocker(ctx, "buildx", "inspect", cfg.Builder); err != nil {
 			return err
 		}
-		fmt.Printf("result=enough_space free_after_kib=%d\n", before)
+		fmt.Printf("result=enough_space free_after_kib=%d\n", before.freeKiB)
 		return nil
 	}
 
@@ -34,32 +33,38 @@ func sweepWith(ctx context.Context, cfg Config, readFree func(context.Context, s
 			return err
 		}
 		fmt.Printf("planned command: docker %q\n", prune)
-		fmt.Printf("result=dry_run free_after_kib=%d\n", before)
+		fmt.Printf("result=dry_run free_after_kib=%d\n", before.freeKiB)
 		return nil
 	}
 
 	if err := runDocker(ctx, prune...); err != nil {
 		return err
 	}
-	after, err := readFree(ctx, cfg.DockerDir)
+	after, err := readFree()
 	if err != nil {
 		return fmt.Errorf("prune succeeded but free space could not be checked: %w", err)
 	}
 
 	status := "pruned"
-	if cfg.MinFreeGiB != 0 && after/kibPerGiB < cfg.MinFreeGiB{
+	lowReserve := after.below(cfg.MinFreeAfterGiB, cfg.MinFreeAfterInodes)
+	if lowReserve {
+		status = "low_space_after_prune"
+	} else if cfg.MinFreeGiB != 0 && after.below(cfg.MinFreeGiB, 0) {
 		status = "below_threshold_after_prune"
 	}
 
-	delta := fmt.Sprintf("%d", after-before)
-	if after < before{
-		delta = fmt.Sprintf("-%d", before-after)
+	var delta string
+	if after.freeKiB < before.freeKiB {
+		delta = fmt.Sprintf("-%d", before.freeKiB-after.freeKiB)
+	} else {
+		delta = fmt.Sprintf("%d", after.freeKiB-before.freeKiB)
 	}
 
-	fmt.Printf("result=%s free_before_kib=%d, free_after_kib=%d free_delta_kib=%s thresjold_gib=%d\n",
-	status, before, after, delta, cfg.MinFreeGiB,
-)
-
+	fmt.Printf("result=%s free_before_kib=%d free_after_kib=%d free_delta_kib=%s threshold_gib=%d free_after_inodes=%d min_free_after_gib=%d min_free_after_inodes=%d\n",
+		status, before.freeKiB, after.freeKiB, delta, cfg.MinFreeGiB, after.freeInodes, cfg.MinFreeAfterGiB, cfg.MinFreeAfterInodes)
+	if lowReserve {
+		return fmt.Errorf("disk reserve not restored at %q after prune", cfg.DockerDir)
+	}
 	return nil
 }
 

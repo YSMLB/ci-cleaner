@@ -1,0 +1,27 @@
+#!/bin/bash
+set -euo pipefail
+
+check_args=()
+while (( $# > 0 )) && [[ $1 != -- ]]; do
+    check_args+=("$1")
+    shift
+done
+if (( ${#check_args[@]} == 0 || $# < 2 )); then
+    echo 'usage: ci-build-guard --min-free-gib N [--min-free-inodes N] PATH [PATH...] -- COMMAND [ARG...]' >&2
+    exit 2
+fi
+shift
+
+# The lock file is created by systemd-tmpfiles. Open read-only so runner
+# accounts can lock the same inode without owning the file or its directory.
+lock=${CI_BUILD_LOCK_PATH:-/run/krokodai-ci-build.lock}
+cleaner=${CI_CLEANER_BIN:-/usr/local/bin/ci-cleaner}
+exec 9<"$lock"
+if ! flock -x -w "${CI_BUILD_LOCK_WAIT_SECONDS:-120}" 9; then
+    echo "result=build_lock_unavailable lock=$lock" >&2
+    exit 75
+fi
+"$cleaner" check-space "${check_args[@]}" 9<&-
+# Keep the lock in this shell while the foreground command runs. Don't
+# hand it to tools that may start a persistent background process.
+"$@" 9<&-

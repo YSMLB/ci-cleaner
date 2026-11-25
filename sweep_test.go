@@ -59,8 +59,8 @@ func TestSweep(t *testing.T) {
 
 			var calls [][]string
 
-			readFree := func(_ context.Context, _ string) (uint64, error) {
-				return tc.kib, nil
+			readFree := func() (diskSpace, error) {
+				return diskSpace{freeKiB: tc.kib}, nil
 			}
 
 			runDocker := func(_ context.Context, args ...string) error {

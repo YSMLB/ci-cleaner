@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -14,11 +15,13 @@ import (
 const sweepTimeout = 2 * time.Minute
 
 type Config struct {
-	DockerDir   string
-	Builder     string
-	MinFreeGiB  uint64
-	MinCacheAge time.Duration
-	Apply       bool
+	DockerDir          string
+	Builder            string
+	MinFreeGiB         uint64
+	MinFreeAfterGiB    uint64
+	MinFreeAfterInodes uint64
+	MinCacheAge        time.Duration
+	Apply              bool
 }
 
 func main() {
@@ -26,6 +29,9 @@ func main() {
 }
 
 func run(args []string) int {
+	if len(args) > 0 && args[0] == "check-space" {
+		return runSpaceCheck(args[1:], os.Stdout, os.Stderr, readDiskSpace)
+	}
 	cfg, err := parseConfig(args)
 	if errors.Is(err, flag.ErrHelp) {
 		return 0
@@ -52,6 +58,16 @@ func parseConfig(args []string) (Config, error) {
 	flags.StringVar(&cfg.DockerDir, "docker-dir", "", "path on the filesystem that stores the builder cache")
 	flags.StringVar(&cfg.Builder, "builder", "", "name of the CI builder")
 	flags.Uint64Var(&cfg.MinFreeGiB, "min-free-gib", 25, "minimum free disk space in GiB (0 disables the threshold)")
+	freeAfter, err := envUint("CI_CLEANER_MIN_FREE_AFTER_GIB")
+	if err != nil {
+		return Config{}, err
+	}
+	inodesAfter, err := envUint("CI_CLEANER_MIN_FREE_AFTER_INODES")
+	if err != nil {
+		return Config{}, err
+	}
+	flags.Uint64Var(&cfg.MinFreeAfterGiB, "min-free-after-gib", freeAfter, "required free disk space after cleanup in GiB")
+	flags.Uint64Var(&cfg.MinFreeAfterInodes, "min-free-after-inodes", inodesAfter, "required free inodes after cleanup")
 	flags.DurationVar(&cfg.MinCacheAge, "min-cache-age", 30*time.Minute, "minimum time since the cache was last used")
 	flags.BoolVar(&cfg.Apply, "apply", false, "perform cache cleanup")
 
@@ -60,6 +76,7 @@ func parseConfig(args []string) (Config, error) {
 			flags.SetOutput(os.Stdout)
 			fmt.Fprintln(os.Stdout, "Usage: ci-cleaner [options]")
 			flags.PrintDefaults()
+			fmt.Fprintln(os.Stdout, "       ci-cleaner check-space --help")
 		}
 		return Config{}, err
 	}
@@ -76,4 +93,16 @@ func parseConfig(args []string) (Config, error) {
 		return Config{}, fmt.Errorf("--min-cache-age must be greater than zero")
 	}
 	return cfg, nil
+}
+
+func envUint(name string) (uint64, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return 0, nil
+	}
+	value, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a non-negative integer: %w", name, err)
+	}
+	return value, nil
 }
