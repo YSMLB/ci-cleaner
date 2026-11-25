@@ -51,7 +51,7 @@ func parseConfig(args []string) (Config, error) {
 	flags.SetOutput(io.Discard)
 	flags.StringVar(&cfg.DockerDir, "docker-dir", "", "path on the filesystem that stores the builder cache")
 	flags.StringVar(&cfg.Builder, "builder", "", "name of the CI builder")
-	flags.Uint64Var(&cfg.MinFreeGiB, "min-free-gib", 25, "minimum free disk space in GiB")
+	flags.Uint64Var(&cfg.MinFreeGiB, "min-free-gib", 25, "minimum free disk space in GiB (0 disables the threshold)")
 	flags.DurationVar(&cfg.MinCacheAge, "min-cache-age", 30*time.Minute, "minimum time since the cache was last used")
 	flags.BoolVar(&cfg.Apply, "apply", false, "perform cache cleanup")
 
@@ -71,9 +71,6 @@ func parseConfig(args []string) (Config, error) {
 	}
 	if strings.TrimSpace(cfg.Builder) == "" {
 		return Config{}, fmt.Errorf("--builder is required")
-	}
-	if cfg.MinFreeGiB == 0 {
-		return Config{}, fmt.Errorf("--min-free-gib must be greater than zero")
 	}
 	if cfg.MinCacheAge <= 0 {
 		return Config{}, fmt.Errorf("--min-cache-age must be greater than zero")

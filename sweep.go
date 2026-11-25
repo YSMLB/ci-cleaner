@@ -20,7 +20,7 @@ func sweepWith(ctx context.Context, cfg Config, readFree func(context.Context, s
 	}
 	fmt.Printf("builder=%q mode=%s free_before_kib=%d threshold_gib=%d\n", cfg.Builder, mode, before, cfg.MinFreeGiB)
 
-	if before/kibPerGiB >= cfg.MinFreeGiB {
+	if cfg.MinFreeGiB != 0 && before/kibPerGiB >= cfg.MinFreeGiB {
 		if err := runDocker(ctx, "buildx", "inspect", cfg.Builder); err != nil {
 			return err
 		}
@@ -45,7 +45,21 @@ func sweepWith(ctx context.Context, cfg Config, readFree func(context.Context, s
 	if err != nil {
 		return fmt.Errorf("prune succeeded but free space could not be checked: %w", err)
 	}
-	fmt.Printf("result=pruned free_after_kib=%d\n", after)
+
+	status := "pruned"
+	if cfg.MinFreeGiB != 0 && after/kibPerGiB < cfg.MinFreeGiB{
+		status = "below_threshold_after_prune"
+	}
+
+	delta := fmt.Sprintf("%d", after-before)
+	if after < before{
+		delta = fmt.Sprintf("-%d", before-after)
+	}
+
+	fmt.Printf("result=%s free_before_kib=%d, free_after_kib=%d free_delta_kib=%s thresjold_gib=%d\n",
+	status, before, after, delta, cfg.MinFreeGiB,
+)
+
 	return nil
 }
 
