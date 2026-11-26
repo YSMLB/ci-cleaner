@@ -68,7 +68,7 @@ func TestSweep(t *testing.T) {
 				return nil
 			}
 
-			err := sweepWith(context.Background(), cfg, readFree, runDocker)
+			err := sweepWith(context.Background(), cfg, readFree, runDocker, nil)
 			if err != nil {
 				t.Fatalf("sweepWith: %v", err)
 			}

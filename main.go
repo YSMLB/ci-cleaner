@@ -22,6 +22,7 @@ type Config struct {
 	MinFreeAfterInodes uint64
 	MinCacheAge        time.Duration
 	Apply              bool
+	PruneResources     bool
 }
 
 func main() {
@@ -70,6 +71,14 @@ func parseConfig(args []string) (Config, error) {
 	flags.Uint64Var(&cfg.MinFreeAfterInodes, "min-free-after-inodes", inodesAfter, "required free inodes after cleanup")
 	flags.DurationVar(&cfg.MinCacheAge, "min-cache-age", 30*time.Minute, "minimum time since the cache was last used")
 	flags.BoolVar(&cfg.Apply, "apply", false, "perform cache cleanup")
+	pruneResources := false
+	if raw := os.Getenv("CI_CLEANER_PRUNE_RESOURCES"); raw != "" {
+		pruneResources, err = strconv.ParseBool(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("CI_CLEANER_PRUNE_RESOURCES must be a boolean: %w", err)
+		}
+	}
+	flags.BoolVar(&cfg.PruneResources, "prune-ci-resources", pruneResources, "include old CI images and detached local volumes")
 
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {

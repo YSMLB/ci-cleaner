@@ -2,12 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 )
 
-func sweepWith(ctx context.Context, cfg Config, readFree func() (diskSpace, error), runDocker func(context.Context, ...string) error) error {
+func sweepWith(ctx context.Context, cfg Config, readFree func() (diskSpace, error), runDocker func(context.Context, ...string) error, pruneResources func(context.Context, Config) error) error {
 	before, err := readFree()
 	if err != nil {
 		return err
@@ -29,20 +30,25 @@ func sweepWith(ctx context.Context, cfg Config, readFree func() (diskSpace, erro
 
 	prune := []string{"buildx", "prune", "--builder", cfg.Builder, "--force", "--filter", "until=" + cfg.MinCacheAge.String()}
 	if !cfg.Apply {
-		if err := runDocker(ctx, "buildx", "du", "--builder", cfg.Builder); err != nil {
-			return err
+		scanErr := runDocker(ctx, "buildx", "du", "--builder", cfg.Builder)
+		if cfg.PruneResources {
+			scanErr = errors.Join(scanErr, pruneResources(ctx, cfg))
+		}
+		if scanErr != nil {
+			return scanErr
 		}
 		fmt.Printf("planned command: docker %q\n", prune)
 		fmt.Printf("result=dry_run free_after_kib=%d\n", before.freeKiB)
 		return nil
 	}
 
-	if err := runDocker(ctx, prune...); err != nil {
-		return err
+	pruneErr := runDocker(ctx, prune...)
+	if cfg.PruneResources {
+		pruneErr = errors.Join(pruneErr, pruneResources(ctx, cfg))
 	}
 	after, err := readFree()
 	if err != nil {
-		return fmt.Errorf("prune succeeded but free space could not be checked: %w", err)
+		return errors.Join(pruneErr, fmt.Errorf("check free space after prune: %w", err))
 	}
 
 	status := "pruned"
@@ -51,6 +57,9 @@ func sweepWith(ctx context.Context, cfg Config, readFree func() (diskSpace, erro
 		status = "low_space_after_prune"
 	} else if cfg.MinFreeGiB != 0 && after.below(cfg.MinFreeGiB, 0) {
 		status = "below_threshold_after_prune"
+	}
+	if pruneErr != nil && !lowReserve {
+		status = "prune_error"
 	}
 
 	var delta string
@@ -63,9 +72,9 @@ func sweepWith(ctx context.Context, cfg Config, readFree func() (diskSpace, erro
 	fmt.Printf("result=%s free_before_kib=%d free_after_kib=%d free_delta_kib=%s threshold_gib=%d free_after_inodes=%d min_free_after_gib=%d min_free_after_inodes=%d\n",
 		status, before.freeKiB, after.freeKiB, delta, cfg.MinFreeGiB, after.freeInodes, cfg.MinFreeAfterGiB, cfg.MinFreeAfterInodes)
 	if lowReserve {
-		return fmt.Errorf("disk reserve not restored at %q after prune", cfg.DockerDir)
+		return errors.Join(pruneErr, fmt.Errorf("disk reserve not restored at %q after prune", cfg.DockerDir))
 	}
-	return nil
+	return pruneErr
 }
 
 func docker(ctx context.Context, args ...string) error {

@@ -1,0 +1,7 @@
+[Unit]
+Description=Check CI disk space and schedule cleanup
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/ci-cleaner
+ExecStart=/bin/sh /usr/local/bin/ci-cleaner-watch.sh

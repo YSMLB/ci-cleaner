@@ -36,7 +36,7 @@ func sweep(ctx context.Context, cfg Config) error {
 		}
 		return fromStatfs(stat), nil
 	}
-	return sweepWith(ctx, cfg, readFree, docker)
+	return sweepWith(ctx, cfg, readFree, docker, pruneDockerResources)
 }
 
 func readDiskSpace(path string) (diskSpace, error) {

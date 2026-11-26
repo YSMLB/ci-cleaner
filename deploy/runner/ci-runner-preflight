@@ -1,8 +1,18 @@
 #!/bin/sh
 set -eu
 
-exec /usr/local/bin/ci-cleaner check-space \
-    --min-free-gib "${CI_RUNNER_MIN_FREE_GIB:?set CI_RUNNER_MIN_FREE_GIB in runner .env}" \
-    --min-free-inodes "${CI_RUNNER_MIN_FREE_INODES:?set CI_RUNNER_MIN_FREE_INODES in runner .env}" \
+rc=0
+/usr/local/bin/ci-cleaner check-space \
+    --min-free-gib "${CI_RUNNER_MIN_FREE_GIB:?missing disk threshold}" \
+    --min-free-inodes "${CI_RUNNER_MIN_FREE_INODES:?missing inode threshold}" \
     "${CI_RUNNER_DOCKER_DIR:-/var/lib/docker}" \
-    "${CI_RUNNER_WORK_DIR:?set CI_RUNNER_WORK_DIR to the existing runner work directory}"
+    "${CI_RUNNER_WORK_DIR:?missing runner work directory}" || rc=$?
+
+case "$rc" in
+    0) exit 0 ;;
+    1)
+        echo "WARNING: свободного места или inode меньше настроенного минимума. Задание продолжится." >&2
+        exit 0
+        ;;
+    *) exit "$rc" ;;
+esac

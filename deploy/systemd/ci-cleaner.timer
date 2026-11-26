@@ -1,10 +1,10 @@
 [Unit]
-Description=Check CI disk space every ten minutes
+Description=Check CI disk space every minute
 
 [Timer]
-OnBootSec=2min
-OnUnitInactiveSec=10min
+OnCalendar=minutely
 AccuracySec=1s
+Unit=ci-cleaner-watch.service
 
 [Install]
 WantedBy=timers.target

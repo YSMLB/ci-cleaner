@@ -38,7 +38,7 @@ func TestSweepChecksReserveAfterPrune(t *testing.T) {
 			err := sweepWith(context.Background(), cfg, read, func(_ context.Context, args ...string) error {
 				command = args
 				return nil
-			})
+			}, nil)
 			if (err != nil) != tc.low || checks != 2 || len(command) < 2 || command[1] != "prune" {
 				t.Fatalf("err=%v checks=%d docker=%v", err, checks, command)
 			}
