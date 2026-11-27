@@ -37,12 +37,12 @@ func TestSweep(t *testing.T) {
 			kib:      24 * 1024 * 1024,
 			minFree:  25,
 			apply:    true,
-			wantArgs: []string{"buildx", "prune", "--builder", "ci-builder", "--force", "--filter", "until=30m0s"},
+			wantArgs: []string{"buildx", "prune", "--builder", "ci-builder", "--all", "--force", "--filter", "until=30m0s"},
 		},
 		{
 			name:     "apply_without_threshold",
 			kib:      100 * 1024 * 1024,
-			wantArgs: []string{"buildx", "prune", "--builder", "ci-builder", "--force", "--filter", "until=30m0s"},
+			wantArgs: []string{"buildx", "prune", "--builder", "ci-builder", "--all", "--force", "--filter", "until=30m0s"},
 			apply:    true,
 		},
 	}

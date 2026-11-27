@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -15,11 +14,13 @@ import (
 )
 
 const resourceMinAge = 30 * time.Minute
-const volumeStatePath = "/var/lib/ci-cleaner/unattached-volumes.json"
+const inspectBatchSize = 32
 
-var migrationImage = regexp.MustCompile(`^issue156migrate[0-9]+a[0-9]+-(app|migrate|webhook|bot|max_bot|celery_worker|celery_beat)$`)
+var ciProject = regexp.MustCompile(`^(issue156migrate[0-9]+a[0-9]+|i95cmp[0-9a-f]{32}|brc[0-9a-f]{32})$`)
+var ciRepository = regexp.MustCompile(`^(issue95-dependency-test|(issue156migrate[0-9]+a[0-9]+|i95cmp[0-9a-f]{32})-[a-z0-9][a-z0-9_-]*|bot-restart-brc[0-9a-f]{32})$`)
 
 type dockerOutput func(context.Context, ...string) ([]byte, error)
+type dockerRemove func(context.Context, ...string) error
 
 type ciImage struct {
 	ID       string
@@ -30,23 +31,14 @@ type ciImage struct {
 
 type dockerVolume struct {
 	Name      string
-	CreatedAt time.Time
+	CreatedAt string
 	Driver    string
-	Options   map[string]string
-}
-
-type volumeObservation struct {
-	CreatedAt time.Time
-	FirstSeen time.Time
 }
 
 func pruneDockerResources(ctx context.Context, cfg Config) error {
-	return cleanupResources(ctx, cfg.Apply, time.Now(), volumeStatePath, dockerResult, docker)
-}
-
-func cleanupResources(ctx context.Context, apply bool, now time.Time, statePath string, output dockerOutput, remove func(context.Context, ...string) error) error {
-	imageErr := cleanupImages(ctx, apply, now, output, remove)
-	volumeErr := cleanupVolumes(ctx, apply, now, statePath, output, remove)
+	now := time.Now()
+	imageErr := cleanupImages(ctx, cfg.Apply, now, dockerResult, docker)
+	volumeErr := cleanupVolumes(ctx, cfg.Apply, now, dockerResult, docker)
 	return errors.Join(imageErr, volumeErr)
 }
 
@@ -55,169 +47,168 @@ func dockerResult(ctx context.Context, args ...string) ([]byte, error) {
 	cmd.Stderr = os.Stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("docker %q: %w", args[:2], err)
+		return out, fmt.Errorf("docker %q: %w", args[:2], err)
 	}
 	return out, nil
 }
 
-func cleanupImages(ctx context.Context, apply bool, now time.Time, output dockerOutput, remove func(context.Context, ...string) error) error {
+func cleanupImages(ctx context.Context, apply bool, now time.Time, output dockerOutput, remove dockerRemove) error {
 	list, err := output(ctx, "image", "ls", "--quiet", "--no-trunc")
 	if err != nil {
 		return err
 	}
 	ids := strings.Fields(string(list))
-	if len(ids) == 0 {
-		return nil
-	}
 	slices.Sort(ids)
-	var images []ciImage
-	if err := inspectResources(ctx, output, "image", slices.Compact(ids), &images); err != nil {
-		return err
-	}
+	images, inspectErr := inspectResources[ciImage](ctx, output, "image", slices.Compact(ids))
 	containers, err := output(ctx, "container", "ls", "--all", "--quiet", "--no-trunc")
 	if err != nil {
-		return err
+		return errors.Join(inspectErr, err)
 	}
 	referenced := map[string]bool{}
 	if ids := strings.Fields(string(containers)); len(ids) != 0 {
 		data, err := output(ctx, append([]string{"container", "inspect", "--format", "{{.Image}}", "--"}, ids...)...)
 		if err != nil {
-			return err
+			return errors.Join(inspectErr, err)
 		}
 		for _, id := range strings.Fields(string(data)) {
 			referenced[id] = true
 		}
 	}
-	var cleanupErr error
+	eligible := 0
 	for _, image := range images {
 		if referenced[image.ID] || !oldCIImage(image, now) {
 			continue
 		}
-		fmt.Printf("candidate=image id=%q tags=%q\n", image.ID, image.RepoTags)
+		eligible++
+		fmt.Printf("candidate=image id=%q tags=%q created=%s\n", image.ID, image.RepoTags, image.Created.Format(time.RFC3339))
 		if apply {
-			if err := remove(ctx, "image", "rm", "--no-prune", "--", image.ID); err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				cleanupErr = errors.New("some CI images could not be removed")
+			if err := removeCIImage(ctx, image, output, remove); err != nil {
+				inspectErr = errors.Join(inspectErr, err)
 			}
 		}
 	}
-	return cleanupErr
+	fmt.Printf("images_eligible=%d\n", eligible)
+	return inspectErr
 }
 
 func oldCIImage(image ciImage, now time.Time) bool {
 	if image.ID == "" || image.Created.IsZero() || now.Sub(image.Created) < resourceMinAge {
 		return false
 	}
-	// Multiple tags can include a retained reference to the same image.
-	if len(image.RepoTags) > 1 {
-		return false
+	explicit := image.Config.Labels["ci-cleaner.gc"] == "true"
+	if len(image.RepoTags) == 0 {
+		return explicit || ciProject.MatchString(image.Config.Labels["com.docker.compose.project"])
 	}
-	if image.Config.Labels["ci-cleaner.gc"] == "true" {
-		return true
+	// An explicit image label also covers multiple tags in its own repository.
+	firstRepo := imageRepository(image.RepoTags[0])
+	allSameRepo, allCI := true, true
+	for _, tag := range image.RepoTags {
+		repo := imageRepository(tag)
+		allCI = allCI && ciRepository.MatchString(repo)
+		allSameRepo = allSameRepo && repo == firstRepo
 	}
-	if len(image.RepoTags) != 1 {
-		return false
-	}
-	repository, _, _ := strings.Cut(image.RepoTags[0], ":")
-	return repository == "issue95-dependency-test" || migrationImage.MatchString(repository)
+	return allCI || (explicit && allSameRepo)
 }
 
-func cleanupVolumes(ctx context.Context, apply bool, now time.Time, statePath string, output dockerOutput, remove func(context.Context, ...string) error) error {
-	previous := map[string]volumeObservation{}
-	data, err := os.ReadFile(statePath)
-	if err == nil {
-		if err := json.Unmarshal(data, &previous); err != nil {
-			return fmt.Errorf("decode volume observations: %w", err)
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
+func imageRepository(tag string) string {
+	if i := strings.LastIndex(tag, ":"); i > strings.LastIndex(tag, "/") {
+		return tag[:i]
 	}
-	list, err := output(ctx, "volume", "ls", "--quiet", "--filter", "dangling=true", "--filter", "driver=local")
+	return tag
+}
+
+func removeCIImage(ctx context.Context, image ciImage, output dockerOutput, remove dockerRemove) error {
+	current, err := inspectResources[ciImage](ctx, output, "image", []string{image.ID})
 	if err != nil {
 		return err
 	}
-	var volumes []dockerVolume
-	if names := strings.Fields(string(list)); len(names) != 0 {
-		if err := inspectResources(ctx, output, "volume", names, &volumes); err != nil {
-			return err
-		}
+	slices.Sort(image.RepoTags)
+	if len(current) != 1 || current[0].ID != image.ID {
+		return fmt.Errorf("image %q changed during cleanup", image.ID)
 	}
-	next, candidates := observeVolumes(previous, volumes, now)
-	if apply {
-		if err := saveVolumeObservations(statePath, next); err != nil {
-			return err
-		}
+	slices.Sort(current[0].RepoTags)
+	if !slices.Equal(image.RepoTags, current[0].RepoTags) {
+		return fmt.Errorf("tags of image %q changed during cleanup", image.ID)
 	}
-	var cleanupErr error
-	for _, volume := range candidates {
-		fmt.Printf("candidate=volume name=%q unbound_observed_since=%s\n", volume.Name, next[volume.Name].FirstSeen.Format(time.RFC3339))
-		if !apply {
-			continue
-		}
-		var current []dockerVolume
-		err := inspectResources(ctx, output, "volume", []string{volume.Name}, &current)
+	// Docker requires untagging aliases before the last reference can be removed by ID.
+	for i := 0; i < len(image.RepoTags)-1; i++ {
+		tag := image.RepoTags[i]
+		id, err := output(ctx, "image", "inspect", "--format", "{{.Id}}", "--", tag)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			cleanupErr = errors.New("some detached volumes could not be checked")
-			continue
+			return err
 		}
-		if len(current) != 1 || current[0].Name != volume.Name || current[0].Driver != "local" || len(current[0].Options) != 0 ||
-			!current[0].CreatedAt.Equal(volume.CreatedAt) {
-			continue
+		if strings.TrimSpace(string(id)) != image.ID {
+			return fmt.Errorf("image tag %q changed during cleanup", tag)
 		}
-		// Docker refuses to remove a volume referenced by any container.
-		if err := remove(ctx, "volume", "rm", "--", volume.Name); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			cleanupErr = errors.New("some detached volumes could not be removed")
+		if err := remove(ctx, "image", "rm", "--no-prune", "--", tag); err != nil {
+			return err
 		}
 	}
-	fmt.Printf("volumes_observed=%d volumes_eligible=%d\n", len(next), len(candidates))
-	return cleanupErr
+	return remove(ctx, "image", "rm", "--no-prune", "--", image.ID)
 }
 
-func observeVolumes(previous map[string]volumeObservation, volumes []dockerVolume, now time.Time) (map[string]volumeObservation, []dockerVolume) {
-	next := make(map[string]volumeObservation, len(volumes))
+func cleanupVolumes(ctx context.Context, apply bool, now time.Time, output dockerOutput, remove dockerRemove) error {
+	list, err := output(ctx, "volume", "ls", "--quiet", "--filter", "dangling=true")
+	if err != nil {
+		return err
+	}
+	names := strings.Fields(string(list))
+	volumes, cleanupErr := inspectResources[dockerVolume](ctx, output, "volume", names)
 	var candidates []dockerVolume
 	for _, volume := range volumes {
-		if volume.Name == "" || volume.Driver != "local" || len(volume.Options) != 0 || volume.CreatedAt.IsZero() {
+		created, err := time.Parse(time.RFC3339Nano, volume.CreatedAt)
+		if err != nil || created.IsZero() || volume.Name == "" || now.Sub(created) < resourceMinAge {
 			continue
 		}
-		observation := previous[volume.Name]
-		if !observation.CreatedAt.Equal(volume.CreatedAt) || observation.FirstSeen.IsZero() || observation.FirstSeen.After(now) {
-			observation = volumeObservation{CreatedAt: volume.CreatedAt, FirstSeen: now}
+		fmt.Printf("candidate=volume name=%q driver=%q created=%s\n", volume.Name, volume.Driver, volume.CreatedAt)
+		candidates = append(candidates, volume)
+	}
+	fmt.Printf("volumes_observed=%d volumes_eligible=%d\n", len(names), len(candidates))
+	if !apply {
+		return cleanupErr
+	}
+	for len(candidates) > 0 && ctx.Err() == nil {
+		batch := candidates[:min(inspectBatchSize, len(candidates))]
+		candidates = candidates[len(batch):]
+		expected := make(map[string]dockerVolume, len(batch))
+		names := make([]string, 0, len(batch))
+		for _, volume := range batch {
+			names = append(names, volume.Name)
+			expected[volume.Name] = volume
 		}
-		next[volume.Name] = observation
-		if now.Sub(observation.FirstSeen) >= resourceMinAge && now.Sub(volume.CreatedAt) >= resourceMinAge {
-			candidates = append(candidates, volume)
+		current, err := inspectResources[dockerVolume](ctx, output, "volume", names)
+		cleanupErr = errors.Join(cleanupErr, err)
+		names = names[:0]
+		for _, volume := range current {
+			if original, ok := expected[volume.Name]; ok && original == volume {
+				names = append(names, volume.Name)
+			}
+		}
+		if len(names) > 0 {
+			// The daemon checks current container references on each non-forced removal.
+			err := remove(ctx, append([]string{"volume", "rm", "--"}, names...)...)
+			cleanupErr = errors.Join(cleanupErr, err)
 		}
 	}
-	return next, candidates
+	return errors.Join(cleanupErr, ctx.Err())
 }
 
-func inspectResources[T any](ctx context.Context, output dockerOutput, kind string, ids []string, dst *[]T) error {
-	data, err := output(ctx, append([]string{kind, "inspect", "--"}, ids...)...)
-	if err != nil {
-		return err
+// Inspect in bounded batches. Docker can return valid records alongside an
+// error when another job removes one of the listed objects during inspection.
+func inspectResources[T any](ctx context.Context, output dockerOutput, kind string, ids []string) ([]T, error) {
+	var records []T
+	var inspectErr error
+	for len(ids) > 0 && ctx.Err() == nil {
+		batch := ids[:min(inspectBatchSize, len(ids))]
+		ids = ids[len(batch):]
+		data, err := output(ctx, append([]string{kind, "inspect", "--"}, batch...)...)
+		inspectErr = errors.Join(inspectErr, err)
+		var items []T
+		if err := json.Unmarshal(data, &items); err != nil {
+			inspectErr = errors.Join(inspectErr, fmt.Errorf("decode Docker %s inspection: %w", kind, err))
+			continue
+		}
+		records = append(records, items...)
 	}
-	if err := json.Unmarshal(data, dst); err != nil {
-		return fmt.Errorf("decode Docker %s inspection: %w", kind, err)
-	}
-	return nil
-}
-
-func saveVolumeObservations(path string, observations map[string]volumeObservation) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return err
-	}
-	file, err := os.CreateTemp(dir, "unattached-volumes-")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(file.Name())
-	err = json.NewEncoder(file).Encode(observations)
-	if err := errors.Join(err, file.Close()); err != nil {
-		return err
-	}
-	return os.Rename(file.Name(), path)
+	return records, errors.Join(inspectErr, ctx.Err())
 }

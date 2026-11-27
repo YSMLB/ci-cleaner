@@ -42,7 +42,11 @@ func run(args []string) int {
 		return 2
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), sweepTimeout)
+	timeout := sweepTimeout
+	if cfg.PruneResources {
+		timeout = 20 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	if err := sweep(ctx, cfg); err != nil {
@@ -78,7 +82,7 @@ func parseConfig(args []string) (Config, error) {
 			return Config{}, fmt.Errorf("CI_CLEANER_PRUNE_RESOURCES must be a boolean: %w", err)
 		}
 	}
-	flags.BoolVar(&cfg.PruneResources, "prune-ci-resources", pruneResources, "include old CI images and detached local volumes")
+	flags.BoolVar(&cfg.PruneResources, "prune-ci-resources", pruneResources, "include old CI images and detached Docker volumes")
 
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {

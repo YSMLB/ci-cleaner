@@ -21,9 +21,10 @@ bundle=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 config=/etc/default/ci-cleaner
 binary=/usr/local/bin/ci-cleaner
 timer=/etc/systemd/system/ci-cleaner.timer
+timeout_override=/etc/systemd/system/ci-cleaner.service.d/resources-timeout.conf
 for path in "$config" "$binary" "$timer" "$bundle/ci-cleaner" \
     "$bundle"/deploy/runner/{ci-build-guard,ci-build-guard.conf,ci-runner-preflight} \
-    "$bundle"/deploy/systemd/{ci-cleaner-watch.sh,ci-cleaner-watch.service,ci-cleaner.timer}; do
+    "$bundle"/deploy/systemd/{ci-cleaner-watch.sh,ci-cleaner-watch.service,ci-cleaner.timer,resources-timeout.conf}; do
     if [[ ! -f $path ]]; then
         echo "Required file missing: $path" >&2
         exit 2
@@ -42,14 +43,17 @@ backup=$(mktemp -d /root/ci-cleaner-backup.XXXXXXXX)
 cp -a -- "$config" "$backup/default-ci-cleaner"
 cp -a -- "$binary" "$backup/ci-cleaner"
 cp -a -- "$timer" "$backup/ci-cleaner.timer"
+if [[ -f $timeout_override ]]; then
+    cp -a -- "$timeout_override" "$backup/resources-timeout.conf"
+fi
 echo "Backup: $backup"
 
 new_config=$(mktemp "${config}.XXXXXX")
 new_binary=$(mktemp "${binary}.XXXXXX")
 trap 'rm -f -- "$new_config" "$new_binary"' EXIT
-awk '!/^[[:space:]]*(MIN_FREE_GIB|APPLY_FLAG|CI_CLEANER_MIN_FREE_AFTER_GIB|CI_CLEANER_MIN_FREE_AFTER_INODES)[[:space:]]*=/' \
+awk '!/^[[:space:]]*(MIN_FREE_GIB|MIN_CACHE_AGE|APPLY_FLAG|CI_CLEANER_PRUNE_RESOURCES|CI_CLEANER_MIN_FREE_AFTER_GIB|CI_CLEANER_MIN_FREE_AFTER_INODES)[[:space:]]*=/' \
     "$config" > "$new_config"
-printf 'MIN_FREE_GIB=0\nAPPLY_FLAG=--apply\nCI_CLEANER_MIN_FREE_AFTER_GIB=%s\nCI_CLEANER_MIN_FREE_AFTER_INODES=%s\n' \
+printf 'MIN_FREE_GIB=0\nMIN_CACHE_AGE=30m\nAPPLY_FLAG=--apply\nCI_CLEANER_PRUNE_RESOURCES=true\nCI_CLEANER_MIN_FREE_AFTER_GIB=%s\nCI_CLEANER_MIN_FREE_AFTER_INODES=%s\n' \
     "$reserve_gib" "$reserve_inodes" >> "$new_config"
 chmod --reference="$config" "$new_config"
 
@@ -67,6 +71,7 @@ if ! mv -fT -- "$new_config" "$config"; then
 fi
 
 install -m 0755 "$bundle/deploy/systemd/ci-cleaner-watch.sh" /usr/local/bin/
+install -D -m 0644 "$bundle/deploy/systemd/resources-timeout.conf" "$timeout_override"
 install -m 0644 "$bundle/deploy/systemd/ci-cleaner-watch.service" \
     "$bundle/deploy/systemd/ci-cleaner.timer" /etc/systemd/system/
 

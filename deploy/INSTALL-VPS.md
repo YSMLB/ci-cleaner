@@ -7,12 +7,15 @@
 Загрузите архив на VPS. Выполните под root из нового пустого каталога:
 
 ```sh
-python3 -m zipfile -e /root/ci-cleaner-vps-resources-linux-amd64.zip .
+python3 -m zipfile -e /root/ci-cleaner-vps-one-pass-linux-amd64.zip .
+chmod 0755 ./ci-cleaner
+flock -w 30 /run/krokodai-ci-cache-gc.lock ./ci-cleaner --docker-dir /var/lib/docker --builder default --min-free-gib 0 --prune-ci-resources
+# После проверки кандидатов
 bash deploy/install-vps.sh
 systemctl list-timers --all ci-cleaner.timer
 ```
 
-Установщик сохранит бинарник, настройки и старый таймер в каталоге `/root/ci-cleaner-backup.*` и напечатает его путь. Он сохранит раздел, билдер и фильтр возраста из `/etc/default/ci-cleaner`. Новый таймер вызывает `ci-cleaner-watch.service` каждую минуту. При остатке от 15 ГиБ очистка запускается раз в 30 минут. При переходе ниже 15 ГиБ она запускается на первом низком замере и повторяется раз в 5 минут, пока запас не восстановится.
+Установщик сохранит бинарник, настройки и старый таймер в каталоге `/root/ci-cleaner-backup.*` и напечатает его путь. Он сохранит раздел и билдер из `/etc/default/ci-cleaner`. Таймер вызывает `ci-cleaner-watch.service` каждую минуту. При остатке от 15 ГиБ очистка запускается раз в 30 минут. При переходе ниже 15 ГиБ она запускается на первом низком замере и повторяется раз в 5 минут, пока запас не восстановится.
 
 После очистки cleaner проверяет отдельный запас. Начальные значения — 15 ГиБ и 10 000 inode. Для другого запаса после очистки можно указать, например, `bash deploy/install-vps.sh 20 20000`. Порог переключения расписания задаётся в скрипте проверки.
 
@@ -22,19 +25,15 @@ journalctl -u ci-cleaner-watch.service -u ci-cleaner.service -n 40 --no-pager
 
 В свежей записи при реальной очистке ищите `mode=apply`, `threshold_gib=0` и `min_free_after_gib=15` или свой минимум. При нехватке места после очистки служба выдаёт `result=low_space_after_prune` и код 1. Для уведомления команды подключите событие к действующему мониторингу.
 
-## Включить уборку образов и томов
+## Что попадает в один проход
 
-После установки проверьте отбор под действующей блокировкой, без `--apply`. Подставьте параметры своего Docker из файла настроек:
+Установщик включает `CI_CLEANER_PRUNE_RESOURCES=true`, `MIN_CACHE_AGE=30m` и `--apply` для следующего планового запуска.
 
-```sh
-flock -n -E 75 /run/krokodai-ci-cache-gc.lock \
-  /usr/local/bin/ci-cleaner --docker-dir /var/lib/docker --builder default \
-  --min-free-gib 0 --prune-ci-resources
-```
+- Строки `candidate=image` перечисляют образы, созданные минимум 30 минут назад. Клинер распознаёт репозитории сборок `issue95-dependency-test`, `issue156migrate…`, `i95cmp…`, `bot-restart-brc…` и метку `ci-cleaner.gc=true`. Для образов без тегов также учитывает метку проекта Compose тестового запуска. Проверяет ссылки всех контейнеров, включая остановленные, и сохраняет образы со сторонними тегами.
+- Строки `candidate=volume` перечисляют именованные и анонимные Docker-тома с известным временем создания, которым исполнилось 30 минут и которыми сейчас не пользуется ни один контейнер. Том, отсоединённый совсем недавно, тоже подходит, если с создания прошло 30 минут. Содержимое тома удаляется целиком. Клинер повторно сверяет имя, драйвер и время создания, затем вызывает Docker без принудительного удаления.
+- В конце прохода BuildKit очищает доступный для удаления кэш с фильтром по последнему использованию `until=30m`. В dry-run команда `buildx du` показывает инвентарь билдера. Итоговый объём освобождённого места виден в журнале после реального прохода.
 
-Образы появляются в строках `candidate=image`. Утилита включает временные образы из workflow `issue95-dependency-test` и `issue156migrate`, а также образы с меткой `ci-cleaner.gc=true`. Они должны быть созданы не менее 30 минут назад и не использоваться контейнерами, включая остановленные. Образы с несколькими тегами сохраняются.
-
-После проверки добавьте `CI_CLEANER_PRUNE_RESOURCES=true` в `/etc/default/ci-cleaner`. На первом проходе cleaner запишет список непривязанных локальных томов в `/var/lib/ci-cleaner/unattached-volumes.json`. После 30 минут том может быть удалён, если он снова виден как непривязанный и совпадает время его создания. Перед удалением cleaner перепроверяет это время и вызывает Docker без `--force`. Том с настройками внешнего или bind-монтирования пропускается. Для возврата к уборке кэша установите `CI_CLEANER_PRUNE_RESOURCES=false`.
+При большом количестве томов служба может работать до 21 минуты. Блокировка защищает от наложения проходов. Чтобы оставить только уборку кэша, задайте `CI_CLEANER_PRUNE_RESOURCES=false` в `/etc/default/ci-cleaner`.
 
 ## Подключить проверку раннеров
 
@@ -75,6 +74,7 @@ systemctl stop ci-cleaner.timer &&
 install -m 0755 "$backup/ci-cleaner" /usr/local/bin/ci-cleaner &&
 cp -a "$backup/default-ci-cleaner" /etc/default/ci-cleaner &&
 cp -a "$backup/ci-cleaner.timer" /etc/systemd/system/ci-cleaner.timer &&
+{ if [ -f "$backup/resources-timeout.conf" ]; then cp -a "$backup/resources-timeout.conf" /etc/systemd/system/ci-cleaner.service.d/; else rm -f /etc/systemd/system/ci-cleaner.service.d/resources-timeout.conf; fi; } &&
 systemctl daemon-reload &&
 systemctl restart ci-cleaner.timer
 ```

@@ -28,7 +28,7 @@ func sweepWith(ctx context.Context, cfg Config, readFree func() (diskSpace, erro
 		return nil
 	}
 
-	prune := []string{"buildx", "prune", "--builder", cfg.Builder, "--force", "--filter", "until=" + cfg.MinCacheAge.String()}
+	prune := []string{"buildx", "prune", "--builder", cfg.Builder, "--all", "--force", "--filter", "until=" + cfg.MinCacheAge.String()}
 	if !cfg.Apply {
 		scanErr := runDocker(ctx, "buildx", "du", "--builder", cfg.Builder)
 		if cfg.PruneResources {
@@ -42,10 +42,11 @@ func sweepWith(ctx context.Context, cfg Config, readFree func() (diskSpace, erro
 		return nil
 	}
 
-	pruneErr := runDocker(ctx, prune...)
+	var pruneErr error
 	if cfg.PruneResources {
-		pruneErr = errors.Join(pruneErr, pruneResources(ctx, cfg))
+		pruneErr = pruneResources(ctx, cfg)
 	}
+	pruneErr = errors.Join(pruneErr, runDocker(ctx, prune...))
 	after, err := readFree()
 	if err != nil {
 		return errors.Join(pruneErr, fmt.Errorf("check free space after prune: %w", err))
